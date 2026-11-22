@@ -817,8 +817,9 @@ local function buildDetails()
     local font = _G.DragonUI_ProfessionsOutputFont or GameFontNormalLarge
     frame.title = frame:CreateFontString(nil, "ARTWORK")
     frame.title:SetFontObject(font)
-    frame.title:SetPoint("TOPLEFT", frame.iconRound, "TOPRIGHT", 12, 0)
-    frame.title:SetWidth(240)
+    -- Where the stock form puts the name: 14 right of the 53 icon at (12, -11), 2 down from its top.
+    frame.title:SetPoint("TOPLEFT", frame, "TOPLEFT", 79, -13)
+    frame.title:SetWidth(233)
     frame.title:SetJustifyH("LEFT")
     frame.sub = frame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     frame.sub:SetPoint("TOPLEFT", frame.title, "BOTTOMLEFT", 0, -4)
@@ -923,12 +924,13 @@ local function renderDetails(retry)
     details.hit.recipe = recipe
 
     local color = quality and ITEM_QUALITY_COLORS[quality] or nil
-    details.title:SetText((color and color.hex or "") .. (itemName or recipe.name) .. (color and "|r" or ""))
     local _, rank = GetTradeSkillLine()
     local diff = difficultyFor(recipe, rank or 0)
     local c = _G.TradeSkillTypeColor and TradeSkillTypeColor[diff]
-    details.sub:SetText(string.format("%s%s %d|r  |cff9d9d9d- not learned|r",
-        c and hex(c.r, c.g, c.b) or "|cffa0a0a0", recipe.profession, recipe.skill_level))
+    -- "[skill] Name" like a learned recipe's title.
+    details.title:SetText(string.format("%s[%d]|r %s%s%s", c and hex(c.r, c.g, c.b) or "|cffa0a0a0", recipe.skill_level,
+        color and color.hex or "", itemName or recipe.name, color and "|r" or ""))
+    details.sub:SetText("|cff9d9d9dNot Learned|r")
 
     details.reagentsLabel:ClearAllPoints()
     details.reagentsLabel:SetPoint("TOPLEFT", details, "TOPLEFT", labelX, -labelTop)
