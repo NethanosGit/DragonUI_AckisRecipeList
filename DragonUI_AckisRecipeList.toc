@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: |cff1784d1DragonUI|r Ackis Recipes
+## Notes: Shows the recipes you have not learned yet (from AckisRecipeList) inside DragonUI's Professions window.
+## Version: 0.1.0
+## Dependencies: DragonUI, AckisRecipeList
+## SavedVariables: DragonUI_AckisRecipeListDB
+
+Recipes.lua
+Settings.lua
