@@ -92,8 +92,7 @@ If the line is missing, the add-on tells you in chat at login, and `/duiarl` sho
 - **Vendor prices** appear only for items whose vendor you have seen: the game cannot report a vendor's price
   without opening that vendor's window.
 - **Categories** are learned from the recipes you already know (an unlearned recipe goes under the header that
-  recipes of the same kind sit under). A recipe of a kind you have never learned appears in a separate
-  "Not Learned (Ackis)" group at the end.
+  recipes of the same kind sit under). A recipe of a kind you have never learned is not shown.
 - **Specialty** recipes (for example Goblin Engineering) and recipes of the other faction are not shown.
 - The add-on wraps some of DragonUI's profession functions at runtime. A DragonUI update that changes
   `addon.Professions` (`Model`, `List`, `Details`, `Art`) may break it.

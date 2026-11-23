@@ -1,7 +1,7 @@
 -- DragonUI_AckisRecipeList: AckisRecipeList recipes inside DragonUI's Professions window.
 --
--- Adds a "Not Learned (Ackis)" group at the end of the recipe list. Its rows are the recipes AckisRecipeList
--- knows about that the character has not learned, sorted by required skill and greyed out. Clicking one shows,
+-- Adds the recipes AckisRecipeList knows about that the character has not learned to the recipe list, under the
+-- header their kind belongs to, sorted by required skill and greyed out. Clicking one shows,
 -- in the details pane, what it makes, its reagents and where the recipe is obtained.
 --
 -- Relies on: DragonUI.Professions (Model.Build / Model.Click / Model.Select / Model.SelectedIndex, List.rows,
@@ -16,7 +16,6 @@ if not (DUI and DUI.Professions and DUI.Professions.Model and DUI.Professions.Li
 local P = DUI.Professions
 local Model, List = P.Model, P.List
 
-local GHOST_HEADER = -1
 local GHOST_COLOR = { 0.55, 0.55, 0.55 }
 local MAX_LINES_PER_TYPE = 6
 
@@ -309,7 +308,18 @@ end
 -- Header name for an Ackis recipe; second result is true while its item data is still loading.
 local headerCache = {}   -- [line] = { owner = cat table, [spell id] = header or false }
 
+-- Name rules that win over the learned categories: { Lua pattern on the recipe name, header }, per profession.
+local NAME_RULES = {
+    Tailoring = {
+        { "Bag$", "Bag" },
+        { "^Bolt of ", "Cloth" },
+    },
+}
+
 local function headerFor(line, recipe)
+    for _, rule in ipairs(NAME_RULES[line] or {}) do
+        if recipe.name:find(rule[1]) then return rule[2] end
+    end
     local s = store()
     local cat = s and s.cat[line]
     if not cat then return nil end
@@ -429,7 +439,6 @@ end)
 -- ============================================================================
 
 local selected          -- the Ackis recipe being shown in the details pane
-local collapsedGroup = false
 local details           -- built lazily
 
 local function hex(r, g, b)
@@ -539,22 +548,19 @@ function EXT.BuildWithGhosts(skillUpOnly, search)
         end
     end
     if ghosts then
-        -- Into the header the recipe's kind belongs to; what has no header (yet) gets a group of its own.
-        local open, shut = {}, {}
+        -- Into the header the recipe's kind belongs to.
+        local open = {}
         for _, row in ipairs(rows) do
-            if row.header then
-                if row.expanded then open[row.name] = true else shut[row.name] = true end
-            end
+            if row.header and row.expanded then open[row.name] = true end
         end
-        local byHeader, rest = {}, {}
+        -- A recipe whose header is unknown (or collapsed) is left out.
+        local byHeader = {}
         for _, g in ipairs(ghosts) do
             local header, pending = headerFor(line, g.recipe)
             if pending then Model.pendingItems = true end
             if header and open[header] then
                 byHeader[header] = byHeader[header] or {}
                 table.insert(byHeader[header], g)
-            elseif not (header and shut[header]) then
-                rest[#rest + 1] = g
             end
         end
         -- Inside each header, learned and not learned recipes are merged and ordered by required skill, highest first (as retail).
@@ -596,16 +602,6 @@ function EXT.BuildWithGhosts(skillUpOnly, search)
         end
         flush()
         rows = out
-        -- The group of its own reads highest skill first too.
-        for a = 1, math.floor(#rest / 2) do rest[a], rest[#rest - a + 1] = rest[#rest - a + 1], rest[a] end
-        ghosts = rest
-    end
-    if ghosts and #ghosts > 0 then
-        rows[#rows + 1] = { index = GHOST_HEADER, header = true, ghostHeader = true,
-                            name = "Not Learned (Ackis)", expanded = not collapsedGroup }
-        if not collapsedGroup then
-            for _, row in ipairs(ghosts) do rows[#rows + 1] = row end
-        end
     end
     return rows
 end
@@ -1046,7 +1042,7 @@ end
 local origClick, origSelect = Model.Click, Model.Select
 
 function Model.Click(index, button)
-    if index and index < 0 and index ~= GHOST_HEADER then
+    if index and index < 0 then
         if IsModifiedClick() then
             local recipe = findRecipe(index)
             if recipe and recipe.item_id then
@@ -1064,11 +1060,6 @@ function Model.Click(index, button)
 end
 
 function Model.Select(index)
-    if index == GHOST_HEADER then
-        collapsedGroup = not collapsedGroup
-        List.Refresh()
-        return
-    end
     clearGhost()
     return origSelect(index)
 end
@@ -1116,12 +1107,8 @@ local function styleRows()
     end
 end
 
-hooksecurefunc(List, "Refresh", styleRows)
--- DragonUI registers the original Refresh for these events, so the wrapper above never sees them.
-P.On("Update", styleRows)
-P.On("Selection", styleRows)
-P.On("FavoritesChanged", styleRows)
-P.On("FiltersChanged", styleRows)
+-- DragonUI builds the list once per frame however often it is asked, then fires "Refreshed".
+P.On("Refreshed", styleRows)
 
 -- ============================================================================
 -- ACKIS "SCAN" BUTTON -> "RE-SCAN"
