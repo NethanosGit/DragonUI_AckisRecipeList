@@ -14,6 +14,8 @@ For WoW 3.3.5a (WotLK). It is an add-on for DragonUI and does not modify it.
   price when known) and **where to get the recipe** (trainer, vendor, quest, drop, reputation, with zone and
   coordinates).
 - The skill needed is shown next to the recipe name in the details pane (the list rows stay clean).
+- Fast: the unlearned-recipe rows, reagent lists and "how to obtain" texts are cached, so scrolling and bag
+  changes do not redo the work, and nothing runs every frame while idle.
 - Learned recipes are **cached**, so nothing is scanned each time the window opens. The Ackis **Scan** button on the
   profession window becomes a **Re-Scan** button that re-reads the open profession.
 - Settings window: `/duiarl` (show or hide the feature, hide grey recipes, re-scan everything).
@@ -28,13 +30,27 @@ Both are listed as dependencies in the `.toc`, so the game will not load this ad
 ## Installation
 
 1. Copy the `DragonUI_AckisRecipeList` folder into `Interface\AddOns\`.
-2. **Edit one line in AckisRecipeList** (below). This step is required.
-3. Start the game (or `/reload` after editing).
+2. **Update AckisRecipeList's `core.lua`** (below). This step is required.
+3. Start the game (or `/reload` after copying).
 
-## The one edit you must make in AckisRecipeList
+## The modified AckisRecipeList file (required)
 
-AckisRecipeList keeps its recipe tables in a private variable that other add-ons cannot see. This add-on needs
-one line that makes it visible. You do not need to understand it, just add it:
+This add-on ships a modified `core.lua` for **AckisRecipeList v2.01** in its `AckisRecipeList` subfolder. It has:
+
+- the one-line bridge this add-on needs (`addon.private = private`), because AckisRecipeList keeps its recipe
+  tables in a private variable other add-ons cannot see;
+- speed-ups to how the recipe database is loaded: flag lookups use a prebuilt table instead of scanning every
+  flag table, argument lists are packed once instead of walked with `select(i, ...)`, and profession names are
+  looked up once per profession instead of once per recipe. The data and behaviour are unchanged.
+
+**Easiest way:** copy `DragonUI_AckisRecipeList\AckisRecipeList\core.lua` over
+`Interface\AddOns\AckisRecipeList\core.lua` (replace the file), then `/reload` or restart the game.
+Only use it with AckisRecipeList v2.01; for any other version use the manual edit below.
+If you update or replace AckisRecipeList, copy the file over again.
+
+## Manual edit instead (other versions)
+
+If you prefer not to replace the file, you only need the bridge line (without the speed-ups):
 
 1. Open `Interface\AddOns\AckisRecipeList\core.lua` in a text editor (Notepad is fine).
 2. Find the block of lines that starts around **line 84** and ends around **line 93**:
@@ -92,7 +108,8 @@ If the line is missing, the add-on tells you in chat at login, and `/duiarl` sho
 - **Vendor prices** appear only for items whose vendor you have seen: the game cannot report a vendor's price
   without opening that vendor's window.
 - **Categories** are learned from the recipes you already know (an unlearned recipe goes under the header that
-  recipes of the same kind sit under). A recipe of a kind you have never learned is not shown.
+  recipes of the same kind sit under). A recipe with no known category (a kind you have never learned, or an item
+  the game has not loaded yet) goes into a **Not Learned (Ackis)** group at the end of the list.
 - **Specialty** recipes (for example Goblin Engineering) and recipes of the other faction are not shown.
 - The add-on wraps some of DragonUI's profession functions at runtime. A DragonUI update that changes
   `addon.Professions` (`Model`, `List`, `Details`, `Art`) may break it.

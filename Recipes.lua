@@ -1,7 +1,8 @@
 -- DragonUI_AckisRecipeList: AckisRecipeList recipes inside DragonUI's Professions window.
 --
 -- Adds the recipes AckisRecipeList knows about that the character has not learned to the recipe list, under the
--- header their kind belongs to, sorted by required skill and greyed out. Clicking one shows,
+-- header their kind belongs to (or, with no known header, under a "Not Learned (Ackis)" group at the end),
+-- sorted by required skill and greyed out. Clicking one shows,
 -- in the details pane, what it makes, its reagents and where the recipe is obtained.
 --
 -- Relies on: DragonUI.Professions (Model.Build / Model.Click / Model.Select / Model.SelectedIndex, List.rows,
@@ -16,6 +17,7 @@ if not (DUI and DUI.Professions and DUI.Professions.Model and DUI.Professions.Li
 local P = DUI.Professions
 local Model, List = P.Model, P.List
 
+local GHOST_HEADER = -1
 local GHOST_COLOR = { 0.55, 0.55, 0.55 }
 local MAX_LINES_PER_TYPE = 6
 
@@ -37,8 +39,13 @@ local function root()
     return d
 end
 
+-- store() runs for every list row and recipe, so its answer is kept for as long as the saved variable is the same table.
+local storeDB, storeCache
 local function store()
-    local key = (GetRealmName() or "?") .. "-" .. (UnitName("player") or "?")
+    local d = _G.DragonUI_AckisRecipeListDB
+    if storeCache and d == storeDB then return storeCache end
+    local player = UnitName("player")
+    local key = (GetRealmName() or "?") .. "-" .. (player or "?")
     local chars = root().chars
     local s = chars[key]
     if not s then
@@ -48,8 +55,15 @@ local function store()
     s.known = s.known or {}
     s.dirty = s.dirty or {}
     s.cat = s.cat or {}
+    -- Not cached while the character's name is still unknown (very early load).
+    if player and player ~= _G.UNKNOWNOBJECT and player ~= _G.UNKNOWN then
+        storeDB, storeCache = _G.DragonUI_AckisRecipeListDB, s
+    end
     return s
 end
+
+local seedTries = {}   -- a recipe whose reagents never resolve is not asked again on every list build
+local knownRev = 0     -- bumped whenever any learned-recipe set changes; the cached ghost rows depend on it
 
 local function refreshList()
     if List.frame and _G.TradeSkillFrame and TradeSkillFrame:IsShown() then List.Refresh() end
@@ -65,6 +79,8 @@ function EXT.AckisRescan()
     local s = store()
     if not s then return end
     s.known, s.dirty, s.cat = {}, {}, {}
+    knownRev = knownRev + 1
+    table.wipe(seedTries)
     refreshList()
 end
 
@@ -116,6 +132,9 @@ local seeded = {}   -- recipes whose reagents were stored this session
 -- Stores the reagents of a stock recipe: their real links give the item ids the tooltip text lacks.
 local function seedReagents(index, name)
     if seeded[name] then return end
+    local tries = (seedTries[name] or 0) + 1
+    seedTries[name] = tries
+    if tries > 4 then return end
     local complete = true
     for r = 1, GetTradeSkillNumReagents(index) do
         local rName, icon = GetTradeSkillReagentInfo(index, r)
@@ -167,21 +186,25 @@ local bagWatch = CreateFrame("Frame")
 bagWatch:RegisterEvent("PLAYER_ENTERING_WORLD")
 bagWatch:RegisterEvent("BAG_UPDATE")
 bagWatch:RegisterEvent("BANKFRAME_OPENED")
-local bagDirty, bagWait = false, 0
+-- Bag events come in bursts: read the bags once, a moment after the last one. The timer frame only runs
+-- (and so only costs anything) while a read is waiting.
+local bagTimer, bagWait = CreateFrame("Frame"), 0
+bagTimer:Hide()
+bagTimer:SetScript("OnUpdate", function(self, elapsed)
+    bagWait = bagWait + elapsed
+    if bagWait >= 1.5 then
+        self:Hide()
+        storeContainers(BAG_IDS)
+    end
+end)
 bagWatch:SetScript("OnEvent", function(_, event)
     if event == "BANKFRAME_OPENED" then
         storeContainers(BANK_IDS)
     else
-        bagDirty = true
-    end
-end)
--- Bag events come in bursts: read the bags once, a moment after the last one.
-bagWatch:SetScript("OnUpdate", function(_, elapsed)
-    if not bagDirty then return end
-    bagWait = bagWait + elapsed
-    if bagWait >= 1.5 then
-        bagDirty, bagWait = false, 0
-        storeContainers(BAG_IDS)
+        if not bagTimer:IsShown() then
+            bagWait = 0
+            bagTimer:Show()
+        end
     end
 end)
 
@@ -191,6 +214,7 @@ function EXT.Debug()
     local count = 0
     for _ in pairs(d.items) do count = count + 1 end
     DEFAULT_CHAT_FRAME:AddMessage("|cff1784d1DragonUI_AckisRecipeList|r: " .. count .. " items stored.")
+    if EXT.DebugList then EXT.DebugList() end
     if not EXT.SelectedReagents then return end
     for _, r in ipairs((EXT.SelectedReagents())) do
         local id, e = lookupItem(r.name)
@@ -225,20 +249,24 @@ local function recipesFor(line)
         if name == line then ok = true end
     end
     if not ok then return nil end
-    pcall(ARL.InitializeProfession, ARL, line)
+    local loaded, err = pcall(ARL.InitializeProfession, ARL, line)
+    if not loaded then
+        -- AckisRecipeList stopped halfway: only the recipes before the failure exist.
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff6060DragonUI_AckisRecipeList|r: AckisRecipeList failed to load " .. line ..
+            " recipes: " .. tostring(err))
+    end
     local list = {}
     local faction = UnitFactionGroup("player")
     for _, recipe in pairs(private.recipe_list) do
         if recipe.profession == line and recipe.name and not recipe.specialty then
             local skip = false
-            local okFlags, alliance, horde = pcall(function()
-                return recipe:IsFlagged("common1", "ALLIANCE"), recipe:IsFlagged("common1", "HORDE")
-            end)
-            if okFlags then
-                if faction == "Horde" and alliance and not horde then skip = true end
-                if faction == "Alliance" and horde and not alliance then skip = true end
+            local alliance, horde = recipe:IsFlagged("common1", "ALLIANCE"), recipe:IsFlagged("common1", "HORDE")
+            if faction == "Horde" and alliance and not horde then skip = true end
+            if faction == "Alliance" and horde and not alliance then skip = true end
+            if not skip then
+                recipe.lowerName = recipe.name:lower()   -- the search compares against it on every list build
+                list[#list + 1] = recipe
             end
-            if not skip then list[#list + 1] = recipe end
         end
     end
     table.sort(list, function(a, b)
@@ -308,18 +336,20 @@ end
 -- Header name for an Ackis recipe; second result is true while its item data is still loading.
 local headerCache = {}   -- [line] = { owner = cat table, [spell id] = header or false }
 
--- Name rules that win over the learned categories: { Lua pattern on the recipe name, header }, per profession.
-local NAME_RULES = {
-    Tailoring = {
-        { "Bag$", "Bag" },
-        { "^Bolt of ", "Cloth" },
-    },
-}
+-- The 3.3.5a client only fetches an item it has not seen when something asks for its tooltip, and GetItemInfo
+-- alone does not. Without this, a recipe stays in the "Not Learned" group until clicking it loads its item.
+local queryTip
+local requested = {}
+local function requestItem(id)
+    if not id or requested[id] then return end
+    requested[id] = true
+    queryTip = queryTip or CreateFrame("GameTooltip", "DragonUIExtAckisQuery", UIParent, "GameTooltipTemplate")
+    queryTip:SetOwner(UIParent, "ANCHOR_NONE")
+    queryTip:SetHyperlink("item:" .. id)
+    queryTip:Hide()
+end
 
 local function headerFor(line, recipe)
-    for _, rule in ipairs(NAME_RULES[line] or {}) do
-        if recipe.name:find(rule[1]) then return rule[2] end
-    end
     local s = store()
     local cat = s and s.cat[line]
     if not cat then return nil end
@@ -331,7 +361,10 @@ local function headerFor(line, recipe)
     local known = cache[recipe.spell_id]
     if known ~= nil then return known or nil end
     local keys = catKeys(recipe.item_id, recipe.name)
-    if not keys then return nil, true end
+    if not keys then
+        requestItem(recipe.item_id)
+        return nil, true
+    end
     local best
     for _, key in ipairs(keys) do
         local counts = cat.map[key]
@@ -345,6 +378,39 @@ local function headerFor(line, recipe)
     end
     cache[recipe.spell_id] = best or false
     return best
+end
+
+-- /duiarl debug: how many Ackis recipes the open profession has, and how many cannot be placed under a header.
+function EXT.DebugList()
+    local line = GetTradeSkillLine()
+    local list = line and ghostLists[line]
+    if not list then
+        DEFAULT_CHAT_FRAME:AddMessage("  no Ackis list built for " .. tostring(line) .. " yet.")
+        return
+    end
+    local s = store()
+    local known = s and s.known[line] or {}
+    local _, rank = GetTradeSkillLine()
+    local unlearned, noHeader, pending, shown = 0, 0, 0, 0
+    for _, recipe in ipairs(list) do
+        if not known[recipe.name] and recipe.skill_level <= (rank or 0) then
+            unlearned = unlearned + 1
+            local header, wait = headerFor(line, recipe)
+            if not header then
+                noHeader = noHeader + 1
+                if wait then pending = pending + 1 end
+                if shown < 6 then
+                    shown = shown + 1
+                    local keys = catKeys(recipe.item_id, recipe.name)
+                    DEFAULT_CHAT_FRAME:AddMessage(string.format("    no header: %s (skill %d, item %s, %s)", recipe.name,
+                        recipe.skill_level, tostring(recipe.item_id), keys and ("keys: " .. table.concat(keys, ", ")) or "item not cached"))
+                end
+            end
+        end
+    end
+    DEFAULT_CHAT_FRAME:AddMessage(string.format(
+        "  %s: %d Ackis recipes; up to your skill %d: %d not learned, %d without a header (%d waiting for item data).",
+        line, #list, rank or 0, unlearned, noHeader, pending))
 end
 
 -- Reads every recipe of the open profession, expanding collapsed headers and collapsing them back.
@@ -374,6 +440,7 @@ local function scanKnown(line, set)
         if kind == "header" and collapsed[name] then CollapseTradeSkillSubClass(i) end
     end
     scanning = false
+    knownRev = knownRev + 1
 end
 
 local scanTries = {}      -- per profession, this session
@@ -383,8 +450,10 @@ local settleUntil = 0      -- until then the scan's own list updates are still a
 -- The scan runs on its own frame, never inside a list build: it expands and collapses headers, and every
 -- one of those fires a list update. While it and those updates run the list builds plain (stock rows only);
 -- once they have passed, the list is rebuilt a single time with the Ackis recipes in it.
+-- It is hidden (so no per-frame call) whenever nothing is pending.
 local scanner = CreateFrame("Frame")
-scanner:SetScript("OnUpdate", function()
+scanner:Hide()
+scanner:SetScript("OnUpdate", function(self)
     if scanPending then
         local line = scanPending
         scanPending = nil
@@ -397,10 +466,13 @@ scanner:SetScript("OnUpdate", function()
             scanning = false
             settleUntil = GetTime() + 0.6
         end
-    elseif settleUntil > 0 and GetTime() >= settleUntil then
-        settleUntil = 0
-        refreshList()
+    elseif settleUntil > 0 then
+        if GetTime() >= settleUntil then
+            settleUntil = 0
+            refreshList()
+        end
     end
+    if not scanPending and settleUntil == 0 then self:Hide() end
 end)
 
 -- The learned recipes of a profession, or nil while its first scan is still on its way.
@@ -417,6 +489,7 @@ local function knownSet(line)
         end
         if not s.dirty[line] then scanTries[line] = (scanTries[line] or 0) + 1 end
         scanPending = line
+        scanner:Show()
     end
     return set   -- stale after learning something, nil before the first scan
 end
@@ -424,12 +497,17 @@ end
 -- Learning something at a trainer or from an item: every cached profession is read again on its next open.
 local learned = CreateFrame("Frame")
 learned:RegisterEvent("CHAT_MSG_SYSTEM")
+local learnedPattern   -- built once: this event fires for every system message
 learned:SetScript("OnEvent", function(_, _, msg)
-    local pattern = _G.ERR_LEARN_RECIPE_S and _G.ERR_LEARN_RECIPE_S:gsub("%%s", ".+"):gsub("%-", "%%-")
-    if pattern and msg and msg:find("^" .. pattern .. "$") then
+    if learnedPattern == nil then
+        learnedPattern = _G.ERR_LEARN_RECIPE_S and
+            ("^" .. (_G.ERR_LEARN_RECIPE_S:gsub("%-", "%%-"):gsub("%%s", ".+")) .. "$") or false
+    end
+    if learnedPattern and msg and msg:find(learnedPattern) then
         local s = store()
         if not s then return end
         for line in pairs(s.known) do s.dirty[line] = true end
+        knownRev = knownRev + 1
         refreshList()
     end
 end)
@@ -439,6 +517,7 @@ end)
 -- ============================================================================
 
 local selected          -- the Ackis recipe being shown in the details pane
+local collapsedGroup = false
 local details           -- built lazily
 
 local function hex(r, g, b)
@@ -453,6 +532,8 @@ local function difficultyFor(recipe, rank)
     return "locked"
 end
 
+local ghostCache   -- last answer of ghostRows with the inputs it was made from
+
 local function ghostRows(line, rank, skillUpOnly)
     local s = store()
     if not (s and s.enabled ~= false) or IsTradeSkillLinked() then return nil end
@@ -464,13 +545,25 @@ local function ghostRows(line, rank, skillUpOnly)
     local text = List.SearchText and List.SearchText():lower() or ""
     if text ~= "" and text:match("^[%d~%-%s]+$") then return nil end
 
+    -- The list is rebuilt on every scroll step; the rows only change with one of these inputs.
+    local hide = (s.hideTrivial or skillUpOnly) and true or false
+    local c = ghostCache
+    if c and c.line == line and c.rank == rank and c.hide == hide and c.text == text and c.rev == knownRev
+        and c.list == list and c.known == known then
+        return c.rows
+    end
+
     local rows = {}
     local limit = rank   -- never above the current skill
+    local search = text ~= ""
     for _, recipe in ipairs(list) do
         if recipe.skill_level > limit then break end
-        if not known[recipe.name] and not (text ~= "" and not recipe.name:lower():find(text, 1, true)) then
+        if not known[recipe.name] and recipe.item_id and not GetItemInfo(recipe.item_id) then
+            requestItem(recipe.item_id)   -- every unlearned item up to the skill, at once, whatever the search or filters
+        end
+        if not known[recipe.name] and not (search and not recipe.lowerName:find(text, 1, true)) then
             local difficulty = difficultyFor(recipe, rank)
-            if not ((s.hideTrivial or skillUpOnly) and difficulty == "trivial") then
+            if not (hide and difficulty == "trivial") then
                 rows[#rows + 1] = {
                     index = -recipe.spell_id, ghost = true, recipe = recipe, count = 0,
                     difficulty = difficulty,
@@ -479,11 +572,15 @@ local function ghostRows(line, rank, skillUpOnly)
             end
         end
     end
-    if #rows == 0 then return nil end
+    if #rows == 0 then rows = nil end
+    ghostCache = { line = line, rank = rank, hide = hide, text = text, rev = knownRev, list = list, known = known, rows = rows }
     return rows
 end
 
 local recipeByName   -- defined below with the labels
+local after           -- defined below with the timers
+local itemRetries = 0   -- list rebuilds asked for while item data was still arriving
+local itemRetryQueued = false
 local origBuild = Model.Build
 -- Safety net: if the list is rebuilt in a runaway loop, the Ackis part switches itself off for the session
 -- (and says so) instead of freezing the game. Normal use, even dragging the scroll bar, stays far below it.
@@ -541,27 +638,49 @@ function EXT.BuildWithGhosts(skillUpOnly, search)
             if row.header then
                 header = row.name
             else
-                set[row.name] = true
-                learnCategory(line, header, row.index, row.name)
-                seedReagents(row.index, row.name)
+                local name = row.name
+                if not set[name] then
+                    set[name] = true
+                    knownRev = knownRev + 1
+                end
+                learnCategory(line, header, row.index, name)
+                seedReagents(row.index, name)
             end
         end
     end
     if ghosts then
-        -- Into the header the recipe's kind belongs to.
-        local open = {}
+        -- Into the header the recipe's kind belongs to; what has no header (yet) gets a group of its own.
+        local open, shut = {}, {}
         for _, row in ipairs(rows) do
-            if row.header and row.expanded then open[row.name] = true end
+            if row.header then
+                if row.expanded then open[row.name] = true else shut[row.name] = true end
+            end
         end
-        -- A recipe whose header is unknown (or collapsed) is left out.
-        local byHeader = {}
+        local byHeader, rest = {}, {}
+        local anyPending = false
         for _, g in ipairs(ghosts) do
             local header, pending = headerFor(line, g.recipe)
-            if pending then Model.pendingItems = true end
+            if pending then
+                Model.pendingItems = true
+                anyPending = true
+            end
             if header and open[header] then
                 byHeader[header] = byHeader[header] or {}
                 table.insert(byHeader[header], g)
+            elseif not (header and shut[header]) then
+                rest[#rest + 1] = g
             end
+        end
+        -- Items requested above arrive a moment later: look again, a few times, until none is left waiting.
+        if not anyPending then
+            itemRetries = 0
+        elseif itemRetries < 8 and not itemRetryQueued then
+            itemRetries = itemRetries + 1
+            itemRetryQueued = true
+            after(1, function()
+                itemRetryQueued = false
+                refreshList()
+            end)
         end
         -- Inside each header, learned and not learned recipes are merged and ordered by required skill, highest first (as retail).
         local out, current, children = {}, nil, {}
@@ -602,6 +721,17 @@ function EXT.BuildWithGhosts(skillUpOnly, search)
         end
         flush()
         rows = out
+        -- The group of its own reads highest skill first too (copied: the cached ghost rows must keep their order).
+        local reversed = {}
+        for a = #rest, 1, -1 do reversed[#reversed + 1] = rest[a] end
+        ghosts = reversed
+    end
+    if ghosts and #ghosts > 0 then
+        rows[#rows + 1] = { index = GHOST_HEADER, header = true, ghostHeader = true,
+                            name = "Not Learned (Ackis)", expanded = not collapsedGroup }
+        if not collapsedGroup then
+            for _, row in ipairs(ghosts) do rows[#rows + 1] = row end
+        end
     end
     return rows
 end
@@ -649,7 +779,10 @@ local function showStockForm()
 end
 
 local scanTip
+local reagentCache = {}   -- [spell id] = parsed reagents, kept once the tooltip has really had text
 local function reagentsOf(spellId)
+    local hit = reagentCache[spellId]
+    if hit then return hit, true end
     scanTip = scanTip or CreateFrame("GameTooltip", "DragonUIExtAckisScan", UIParent, "GameTooltipTemplate")
     scanTip:SetOwner(UIParent, "ANCHOR_NONE")
     scanTip:SetHyperlink("enchant:" .. spellId)
@@ -670,6 +803,7 @@ local function reagentsOf(spellId)
         end
     end
     scanTip:Hide()
+    if seen > 0 then reagentCache[spellId] = out end
     return out, seen > 0
 end
 
@@ -689,7 +823,9 @@ local function unitLine(list, id)
 end
 
 -- "Source: Name - Zone (x, y)" entries, grouped under their acquire type.
-local function acquireText(recipe)
+local acquireCache = {}   -- the text only depends on static Ackis data
+
+local function buildAcquireText(recipe)
     local A = private.acquire_types
     local gold, white, grey = "|cffffd100", "|cffffffff", "|cff9d9d9d"
     local chunks = {}
@@ -764,6 +900,15 @@ local function acquireText(recipe)
     end
     if #chunks == 0 then return grey .. "No source known.|r" end
     return table.concat(chunks, "\n\n")
+end
+
+local function acquireText(recipe)
+    local text = acquireCache[recipe.spell_id]
+    if not text then
+        text = buildAcquireText(recipe)
+        acquireCache[recipe.spell_id] = text
+    end
+    return text
 end
 
 -- The icon is 1px smaller on every side than DragonUI's 36 (34, 2.5 in), so these offsets are DragonUI's plus 1:
@@ -886,16 +1031,25 @@ end
 local labelX, labelTop = 12, 86   -- set from the stock form by measureStockLabel
 local measuredTop   -- { lowest, highest } label offset seen on stock recipes
 -- 3.3.5a has no C_Timer; a throwaway OnUpdate frame stands in.
-local function after(delay, fn)
-    local f = CreateFrame("Frame")
-    local t = 0
-    f:SetScript("OnUpdate", function(self, elapsed)
-        t = t + elapsed
-        if t >= delay then
-            self:SetScript("OnUpdate", nil)
-            fn()
+-- One shared frame, shown only while a call is waiting (a new frame per call is never freed).
+local timers = {}
+local timerFrame = CreateFrame("Frame")
+timerFrame:Hide()
+timerFrame:SetScript("OnUpdate", function(self, elapsed)
+    for i = #timers, 1, -1 do
+        local t = timers[i]
+        t.left = t.left - elapsed
+        if t.left <= 0 then
+            table.remove(timers, i)
+            t.fn()
         end
-    end)
+    end
+    if #timers == 0 then self:Hide() end
+end)
+
+after = function(delay, fn)
+    timers[#timers + 1] = { left = delay, fn = fn }
+    timerFrame:Show()
 end
 
 function EXT.SelectedReagents()
@@ -988,8 +1142,14 @@ end
 -- Bag counts follow what the player picks up or spends.
 local bags = CreateFrame("Frame")
 bags:RegisterEvent("BAG_UPDATE")
+local bagRender = false   -- one re-render per burst of bag events
 bags:SetScript("OnEvent", function()
-    if selected and details and details:IsShown() then renderDetails(3) end
+    if bagRender or not (selected and details and details:IsShown()) then return end
+    bagRender = true
+    after(0.1, function()
+        bagRender = false
+        if selected and details and details:IsShown() then renderDetails(3) end
+    end)
 end)
 
 -- Where the stock "Reagents:" label sits in the form. Blizzard hangs it under the description when a recipe has
@@ -1033,16 +1193,14 @@ local function clearGhost()
 end
 
 local function findRecipe(index)
-    local line = GetTradeSkillLine()
-    for _, recipe in ipairs(ghostLists[line] or {}) do
-        if recipe.spell_id == -index then return recipe end
-    end
+    local recipe = private and private.recipe_list[-index]
+    if recipe and recipe.profession == GetTradeSkillLine() then return recipe end
 end
 
 local origClick, origSelect = Model.Click, Model.Select
 
 function Model.Click(index, button)
-    if index and index < 0 then
+    if index and index < 0 and index ~= GHOST_HEADER then
         if IsModifiedClick() then
             local recipe = findRecipe(index)
             if recipe and recipe.item_id then
@@ -1060,6 +1218,11 @@ function Model.Click(index, button)
 end
 
 function Model.Select(index)
+    if index == GHOST_HEADER then
+        collapsedGroup = not collapsedGroup
+        List.Refresh()
+        return
+    end
     clearGhost()
     return origSelect(index)
 end
@@ -1121,15 +1284,21 @@ function EXT.AckisRescanCurrent()
     local s = store()
     if not (line and s) then return end
     s.known[line], s.cat[line], s.dirty[line] = nil, nil, nil
+    knownRev = knownRev + 1
     table.wipe(seeded)
+    table.wipe(seedTries)
     refreshList()
     DEFAULT_CHAT_FRAME:AddMessage("|cff1784d1DragonUI_AckisRecipeList|r: rescanned " .. line .. ".")
 end
 
+local scanButtonDone = false
 local function repurposeScanButton()
+    if scanButtonDone then return end   -- runs on every list update; the button only needs it once
     local arl = _G.AckisRecipeList
     local button = type(arl) == "table" and arl.scan_button
-    if not button or button.extRescan then return end
+    if not button then return end
+    scanButtonDone = true
+    if button.extRescan then return end
     button.extRescan = true
     button:SetScript("OnClick", function() EXT.AckisRescanCurrent() end)
     button:SetScript("OnEnter", function(self)
